@@ -9,7 +9,7 @@
     {
       "name": "opencodex-limits",
       "description": "Отображение лимитов и расхода токенов OpenCodex внутри интерфейса Claude Desktop",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "teroguy"
       },
