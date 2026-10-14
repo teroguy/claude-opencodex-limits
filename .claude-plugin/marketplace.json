@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-opencodex-limits",
+  "description": "Claude Desktop / Claude Code plugin to display OpenCodex token usage and provider limits",
+  "owner": {
+    "name": "teroguy"
+  },
+  "plugins": [
+    {
+      "name": "opencodex-limits",
+      "description": "Отображение лимитов и расхода токенов OpenCodex внутри интерфейса Claude Desktop",
+      "version": "0.1.0",
+      "author": {
+        "name": "teroguy"
+      },
+      "source": "./"
+    }
+  ]
+}

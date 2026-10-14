@@ -1,0 +1,9 @@
+{
+  "name": "opencodex-limits",
+  "version": "0.1.0",
+  "description": "Отображение лимитов и расхода токенов OpenCodex внутри интерфейса Claude Desktop",
+  "author": {
+    "name": "teroguy"
+  },
+  "types": "./types/index.d.ts"
+}
