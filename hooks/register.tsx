@@ -24,6 +24,9 @@ const lastRefreshAtom = atom(
   0,
 );
 
+let lastKnownWeeklyRemaining: number | undefined = undefined;
+let lastKnownWeeklyReset: string | undefined = undefined;
+
 function formatNumber(num: number): string {
   if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M';
   if (num >= 1_000) return Math.round(num / 1_000) + 'k';
@@ -51,7 +54,6 @@ interface ActiveQuotaInfo {
 }
 
 function getActiveQuota(summary: OpenCodexSummary): ActiveQuotaInfo | null {
-  // Prefer google-antigravity quota (which holds Antigravity 5h and weekly limits)
   const quotaProvider =
     summary.quotas.find((q) => q.provider === 'google-antigravity') ||
     summary.quotas.find((q) => q.provider === summary.activeProvider) ||
@@ -59,64 +61,99 @@ function getActiveQuota(summary: OpenCodexSummary): ActiveQuotaInfo | null {
 
   if (!quotaProvider) return null;
 
+  let fiveHourRem: number = 100;
+  let fiveHourRst: string = '';
+  let weeklyRem: number | undefined = undefined;
+  let weeklyRst: string | undefined = undefined;
+
   if (quotaProvider.customWindows && quotaProvider.customWindows.length > 0) {
     const gem5h = quotaProvider.customWindows.find((w) => w.label === 'Gem');
-    const gemWeek = quotaProvider.customWindows.find((w) => w.label === 'Gem (Weekly)');
-    const cla5h = quotaProvider.customWindows.find((w) => w.label === 'Cla');
-    const claWeek = quotaProvider.customWindows.find((w) => w.label === 'Cla (Weekly)');
+    const gemWeek = quotaProvider.customWindows.find((w) =>
+      w.label === 'Gem (Weekly)' || w.label.toLowerCase().includes('week')
+    );
 
-    const modelLower = summary.activeModel.toLowerCase();
-    const isAntigravityClaude =
-      summary.activeProvider === 'google-antigravity' &&
-      (modelLower.includes('claude') ||
-        modelLower.includes('sonnet') ||
-        modelLower.includes('opus'));
-
-    // If explicitly running Claude on google-antigravity and it has quota
-    if (isAntigravityClaude && (cla5h || claWeek)) {
-      return {
-        fiveHourRemaining: cla5h
-          ? Math.max(0, Math.min(100, Math.round(100 - cla5h.percent)))
-          : 100,
-        fiveHourReset: formatResetRu(cla5h?.resetAt),
-        weeklyRemaining: claWeek
-          ? Math.max(0, Math.min(100, Math.round(100 - claWeek.percent)))
-          : undefined,
-        weeklyReset: formatResetRu(claWeek?.resetAt),
-      };
+    if (gem5h) {
+      fiveHourRem = Math.max(0, Math.min(100, Math.round(100 - gem5h.percent)));
+      fiveHourRst = formatResetRu(gem5h.resetAt);
     }
-
-    // Default to Gemini Antigravity quota
-    if (gem5h || gemWeek) {
-      return {
-        fiveHourRemaining: gem5h
-          ? Math.max(0, Math.min(100, Math.round(100 - gem5h.percent)))
-          : 100,
-        fiveHourReset: formatResetRu(gem5h?.resetAt),
-        weeklyRemaining: gemWeek
-          ? Math.max(0, Math.min(100, Math.round(100 - gemWeek.percent)))
-          : undefined,
-        weeklyReset: formatResetRu(gemWeek?.resetAt),
-      };
+    if (gemWeek) {
+      weeklyRem = Math.max(0, Math.min(100, Math.round(100 - gemWeek.percent)));
+      weeklyRst = formatResetRu(gemWeek.resetAt);
     }
   }
 
-  if (quotaProvider.fiveHourPercent !== undefined) {
-    return {
-      fiveHourRemaining: Math.max(
-        0,
-        Math.min(100, Math.round(100 - quotaProvider.fiveHourPercent)),
-      ),
-      fiveHourReset: formatResetRu(quotaProvider.fiveHourResetAt),
-      weeklyRemaining:
-        quotaProvider.weeklyPercent !== undefined
-          ? Math.max(0, Math.min(100, Math.round(100 - quotaProvider.weeklyPercent)))
-          : undefined,
-      weeklyReset: formatResetRu(quotaProvider.weeklyResetAt),
+  if (fiveHourRem === 100 && quotaProvider.fiveHourPercent !== undefined) {
+    fiveHourRem = Math.max(
+      0,
+      Math.min(100, Math.round(100 - quotaProvider.fiveHourPercent)),
+    );
+    fiveHourRst = formatResetRu(quotaProvider.fiveHourResetAt);
+  }
+  if (weeklyRem === undefined && quotaProvider.weeklyPercent !== undefined) {
+    weeklyRem = Math.max(
+      0,
+      Math.min(100, Math.round(100 - quotaProvider.weeklyPercent)),
+    );
+    weeklyRst = formatResetRu(quotaProvider.weeklyResetAt);
+  }
+
+  // Preserve last-known weekly quota across transient probes
+  if (weeklyRem !== undefined) {
+    lastKnownWeeklyRemaining = weeklyRem;
+    lastKnownWeeklyReset = weeklyRst;
+  } else if (lastKnownWeeklyRemaining !== undefined) {
+    weeklyRem = lastKnownWeeklyRemaining;
+    weeklyRst = lastKnownWeeklyReset;
+  }
+
+  return {
+    fiveHourRemaining: fiveHourRem,
+    fiveHourReset: fiveHourRst,
+    weeklyRemaining: weeklyRem !== undefined ? weeklyRem : 100,
+    weeklyReset: weeklyRst,
+  };
+}
+
+function addOrMergeQuota(
+  quotas: ProviderQuotaState[],
+  provider: string,
+  rawQ: any,
+) {
+  let existing = quotas.find((q) => q.provider === provider);
+  if (!existing) {
+    existing = {
+      provider,
+      customWindows: [],
+      updatedAt: Date.now(),
     };
+    quotas.push(existing);
   }
 
-  return null;
+  if (rawQ.fiveHourPercent !== undefined)
+    existing.fiveHourPercent = rawQ.fiveHourPercent;
+  if (rawQ.fiveHourResetAt)
+    existing.fiveHourResetAt = rawQ.fiveHourResetAt;
+  if (rawQ.weeklyPercent !== undefined)
+    existing.weeklyPercent = rawQ.weeklyPercent;
+  if (rawQ.weeklyResetAt)
+    existing.weeklyResetAt = rawQ.weeklyResetAt;
+
+  if (Array.isArray(rawQ.customWindows)) {
+    if (!existing.customWindows) existing.customWindows = [];
+    for (const cw of rawQ.customWindows) {
+      const idx = existing.customWindows.findIndex((w) => w.label === cw.label);
+      const item: ProviderQuotaWindowItem = {
+        label: cw.label,
+        percent: cw.percent !== undefined ? cw.percent : 0,
+        resetAt: cw.resetAt,
+      };
+      if (idx >= 0) {
+        existing.customWindows[idx] = item;
+      } else {
+        existing.customWindows.push(item);
+      }
+    }
+  }
 }
 
 async function fetchOpenCodexData($: any): Promise<OpenCodexSummary> {
@@ -226,71 +263,34 @@ async function fetchOpenCodexData($: any): Promise<OpenCodexSummary> {
         const data = JSON.parse(res.text);
         if (Array.isArray(data.accounts)) {
           for (const acc of data.accounts) {
-            if (acc.quota && !quotas.some((q) => q.provider === 'google-antigravity')) {
-              const q = acc.quota;
-              const windows: ProviderQuotaWindowItem[] = [];
-              if (Array.isArray(q.customWindows)) {
-                for (const cw of q.customWindows) {
-                  windows.push({
-                    label: cw.label,
-                    percent: cw.percent !== undefined ? cw.percent : 0,
-                    resetAt: cw.resetAt,
-                  });
-                }
-              }
-              quotas.push({
-                provider: 'google-antigravity',
-                fiveHourPercent: q.fiveHourPercent,
-                fiveHourResetAt: q.fiveHourResetAt,
-                weeklyPercent: q.weeklyPercent,
-                weeklyResetAt: q.weeklyResetAt,
-                customWindows: windows,
-                updatedAt: q.updatedAt || Date.now(),
-              });
+            if (acc.quota) {
+              addOrMergeQuota(quotas, 'google-antigravity', acc.quota);
             }
           }
         }
       }
     } catch {}
 
-    if (quotas.length === 0) {
-      try {
-        const res = await $.http.fetch(`http://127.0.0.1:${port}/api/provider-quotas`, {
+    try {
+      const res = await $.http.fetch(
+        `http://127.0.0.1:${port}/api/provider-quotas`,
+        {
           headers: {
             Authorization: `Bearer ${adminToken}`,
           },
-        });
-        if (res.ok && res.text) {
-          const data = JSON.parse(res.text);
-          if (Array.isArray(data.reports)) {
-            for (const rep of data.reports) {
-              const q = rep.quota;
-              if (q) {
-                const windows: ProviderQuotaWindowItem[] = [];
-                if (Array.isArray(q.customWindows)) {
-                  for (const cw of q.customWindows) {
-                    windows.push({
-                      label: cw.label,
-                      percent: cw.percent !== undefined ? cw.percent : 0,
-                      resetAt: cw.resetAt,
-                    });
-                  }
-                }
-                quotas.push({
-                  provider: rep.provider,
-                  fiveHourPercent: q.fiveHourPercent,
-                  fiveHourResetAt: q.fiveHourResetAt,
-                  weeklyPercent: q.weeklyPercent,
-                  weeklyResetAt: q.weeklyResetAt,
-                  customWindows: windows,
-                  updatedAt: q.updatedAt || Date.now(),
-                });
-              }
+        },
+      );
+      if (res.ok && res.text) {
+        const data = JSON.parse(res.text);
+        if (Array.isArray(data.reports)) {
+          for (const rep of data.reports) {
+            if (rep.quota) {
+              addOrMergeQuota(quotas, rep.provider, rep.quota);
             }
           }
         }
-      } catch {}
-    }
+      }
+    } catch {}
   }
 
   if (quotas.length === 0) {
@@ -302,32 +302,7 @@ async function fetchOpenCodexData($: any): Promise<OpenCodexSummary> {
       if (diskData?.rows) {
         for (const [key, q] of Object.entries(diskData.rows)) {
           const prov = key.split('\u0000')[0] || 'google-antigravity';
-          const typedQ = q as any;
-          const windows: ProviderQuotaWindowItem[] = [];
-          if (Array.isArray(typedQ.customWindows)) {
-            for (const cw of typedQ.customWindows) {
-              windows.push({
-                label: cw.label,
-                percent: cw.percent !== undefined ? cw.percent : 0,
-                resetAt: cw.resetAt,
-              });
-            }
-          }
-          quotas.push({
-            provider: prov,
-            fiveHourPercent:
-              typedQ.fiveHourPercent !== undefined
-                ? Math.round(typedQ.fiveHourPercent)
-                : undefined,
-            fiveHourResetAt: typedQ.fiveHourResetAt,
-            weeklyPercent:
-              typedQ.weeklyPercent !== undefined
-                ? Math.round(typedQ.weeklyPercent)
-                : undefined,
-            weeklyResetAt: typedQ.weeklyResetAt,
-            customWindows: windows,
-            updatedAt: typedQ.updatedAt,
-          });
+          addOrMergeQuota(quotas, prov, q);
         }
       }
     } catch {}
@@ -366,7 +341,6 @@ export const register: Register = (on) => {
       const initial = await fetchOpenCodexData($);
       await update($, summaryAtom, () => initial);
 
-      // Periodic background refresh every 30 seconds
       $.clock.every(30000, async () => {
         try {
           const fresh = await fetchOpenCodexData($);
@@ -444,17 +418,13 @@ export const register: Register = (on) => {
               </Text>
               {renderBar(q.fiveHourRemaining, 8)}
               {q.fiveHourReset && <Text dimColor> ({q.fiveHourReset})</Text>}
-              {q.weeklyRemaining !== undefined && (
-                <Text>
-                  <Text dimColor> · </Text>
-                  <Text>Неделя: </Text>
-                  <Text color={colorForRemaining(q.weeklyRemaining)}>
-                    {q.weeklyRemaining}%{' '}
-                  </Text>
-                  {renderBar(q.weeklyRemaining, 8)}
-                  {q.weeklyReset && <Text dimColor> ({q.weeklyReset})</Text>}
-                </Text>
-              )}
+              <Text dimColor> · </Text>
+              <Text>Неделя: </Text>
+              <Text color={colorForRemaining(q.weeklyRemaining ?? 100)}>
+                {(q.weeklyRemaining ?? 100)}%{' '}
+              </Text>
+              {renderBar(q.weeklyRemaining ?? 100, 8)}
+              {q.weeklyReset && <Text dimColor> ({q.weeklyReset})</Text>}
             </Text>
           ) : (
             <Text dimColor>Лимиты не загружены</Text>
@@ -490,12 +460,20 @@ export const register: Register = (on) => {
       summary.quotas[0];
 
     const gem5h = primary?.customWindows?.find((w) => w.label === 'Gem');
-    const gemWeek = primary?.customWindows?.find((w) => w.label === 'Gem (Weekly)');
+    const gemWeek = primary?.customWindows?.find(
+      (w) => w.label === 'Gem (Weekly)' || w.label.toLowerCase().includes('week'),
+    );
     const cla5h = primary?.customWindows?.find((w) => w.label === 'Cla');
-    const claWeek = primary?.customWindows?.find((w) => w.label === 'Cla (Weekly)');
+    const claWeek = primary?.customWindows?.find(
+      (w) => w.label === 'Cla (Weekly)' || w.label.toLowerCase().includes('week'),
+    );
 
     const gem5hRem = gem5h ? Math.round(100 - gem5h.percent) : undefined;
-    const gemWeekRem = gemWeek ? Math.round(100 - gemWeek.percent) : undefined;
+    const gemWeekRem = gemWeek
+      ? Math.round(100 - gemWeek.percent)
+      : primary?.weeklyPercent !== undefined
+      ? Math.round(100 - primary.weeklyPercent)
+      : lastKnownWeeklyRemaining;
     const cla5hRem = cla5h ? Math.round(100 - cla5h.percent) : undefined;
     const claWeekRem = claWeek ? Math.round(100 - claWeek.percent) : undefined;
 
