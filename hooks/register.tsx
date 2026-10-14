@@ -357,6 +357,7 @@ async function fetchOpenCodexData($: any): Promise<OpenCodexSummary> {
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     try {
+      $.ui.status(undefined);
       await $.command.register({
         name: 'limits',
         description: 'Показать лимиты и расход токенов OpenCodex',
@@ -364,18 +365,6 @@ export const register: Register = (on) => {
 
       const initial = await fetchOpenCodexData($);
       await update($, summaryAtom, () => initial);
-
-      const q = getActiveQuota(initial);
-      let statusText = 'ocx: ';
-      if (q) {
-        statusText += `5ч: ${q.fiveHourRemaining}%`;
-        if (q.weeklyRemaining !== undefined) {
-          statusText += ` · нед: ${q.weeklyRemaining}%`;
-        }
-      } else {
-        statusText += `${formatNumber(initial.sessionTotalTokens)} tok`;
-      }
-      $.ui.status(statusText);
     } catch {}
 
     return next(e);
@@ -392,23 +381,17 @@ export const register: Register = (on) => {
 
   on('turn.complete', async ($, e, next) => {
     try {
+      $.ui.status(undefined);
       const fresh = await fetchOpenCodexData($);
       await update($, summaryAtom, () => fresh);
-
-      const q = getActiveQuota(fresh);
-      let statusText = 'ocx: ';
-      if (q) {
-        statusText += `5ч: ${q.fiveHourRemaining}%`;
-        if (q.weeklyRemaining !== undefined) {
-          statusText += ` · нед: ${q.weeklyRemaining}%`;
-        }
-      } else {
-        statusText += `${formatNumber(fresh.sessionTotalTokens)} tok`;
-      }
-      $.ui.status(statusText);
       $.ui.invalidate('ui.render');
     } catch {}
 
+    return next(e);
+  });
+
+  on('prompt.submit', async ($, e, next) => {
+    $.ui.status(undefined);
     return next(e);
   });
 
