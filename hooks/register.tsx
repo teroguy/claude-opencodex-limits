@@ -8,6 +8,9 @@ import type {
 } from '../types';
 
 const PANE_ID = 'opencodex-limits';
+const COLOR_PRIMARY = '#d97757'; // Signature Claude terracotta
+const COLOR_BG_LINE = '#555555'; // Distinct background line
+
 const summaryAtom = atom(
   { plugin: 'opencodex-limits', key: 'summary' } as const,
   null as OpenCodexSummary | null,
@@ -40,13 +43,6 @@ function formatResetRu(resetAt?: number): string {
   return `${mins}м`;
 }
 
-function renderCleanBar(percentRemaining: number, width = 8): string {
-  const clamped = Math.max(0, Math.min(100, Math.round(percentRemaining)));
-  const filled = Math.round((clamped / 100) * width);
-  const empty = width - filled;
-  return '━'.repeat(filled) + '─'.repeat(empty);
-}
-
 interface ActiveQuotaInfo {
   fiveHourRemaining: number;
   fiveHourReset: string;
@@ -55,24 +51,29 @@ interface ActiveQuotaInfo {
 }
 
 function getActiveQuota(summary: OpenCodexSummary): ActiveQuotaInfo | null {
-  const primary =
+  // Prefer google-antigravity quota (which holds Antigravity 5h and weekly limits)
+  const quotaProvider =
+    summary.quotas.find((q) => q.provider === 'google-antigravity') ||
     summary.quotas.find((q) => q.provider === summary.activeProvider) ||
     summary.quotas[0];
-  if (!primary) return null;
 
-  const modelLower = summary.activeModel.toLowerCase();
-  const isClaude =
-    modelLower.includes('claude') ||
-    modelLower.includes('sonnet') ||
-    modelLower.includes('opus');
+  if (!quotaProvider) return null;
 
-  if (primary.customWindows && primary.customWindows.length > 0) {
-    const gem5h = primary.customWindows.find((w) => w.label === 'Gem');
-    const gemWeek = primary.customWindows.find((w) => w.label === 'Gem (Weekly)');
-    const cla5h = primary.customWindows.find((w) => w.label === 'Cla');
-    const claWeek = primary.customWindows.find((w) => w.label === 'Cla (Weekly)');
+  if (quotaProvider.customWindows && quotaProvider.customWindows.length > 0) {
+    const gem5h = quotaProvider.customWindows.find((w) => w.label === 'Gem');
+    const gemWeek = quotaProvider.customWindows.find((w) => w.label === 'Gem (Weekly)');
+    const cla5h = quotaProvider.customWindows.find((w) => w.label === 'Cla');
+    const claWeek = quotaProvider.customWindows.find((w) => w.label === 'Cla (Weekly)');
 
-    if (isClaude && (cla5h || claWeek)) {
+    const modelLower = summary.activeModel.toLowerCase();
+    const isAntigravityClaude =
+      summary.activeProvider === 'google-antigravity' &&
+      (modelLower.includes('claude') ||
+        modelLower.includes('sonnet') ||
+        modelLower.includes('opus'));
+
+    // If explicitly running Claude on google-antigravity and it has quota
+    if (isAntigravityClaude && (cla5h || claWeek)) {
       return {
         fiveHourRemaining: cla5h
           ? Math.max(0, Math.min(100, Math.round(100 - cla5h.percent)))
@@ -85,6 +86,7 @@ function getActiveQuota(summary: OpenCodexSummary): ActiveQuotaInfo | null {
       };
     }
 
+    // Default to Gemini Antigravity quota
     if (gem5h || gemWeek) {
       return {
         fiveHourRemaining: gem5h
@@ -99,18 +101,18 @@ function getActiveQuota(summary: OpenCodexSummary): ActiveQuotaInfo | null {
     }
   }
 
-  if (primary.fiveHourPercent !== undefined) {
+  if (quotaProvider.fiveHourPercent !== undefined) {
     return {
       fiveHourRemaining: Math.max(
         0,
-        Math.min(100, Math.round(100 - primary.fiveHourPercent)),
+        Math.min(100, Math.round(100 - quotaProvider.fiveHourPercent)),
       ),
-      fiveHourReset: formatResetRu(primary.fiveHourResetAt),
+      fiveHourReset: formatResetRu(quotaProvider.fiveHourResetAt),
       weeklyRemaining:
-        primary.weeklyPercent !== undefined
-          ? Math.max(0, Math.min(100, Math.round(100 - primary.weeklyPercent)))
+        quotaProvider.weeklyPercent !== undefined
+          ? Math.max(0, Math.min(100, Math.round(100 - quotaProvider.weeklyPercent)))
           : undefined,
-      weeklyReset: formatResetRu(primary.weeklyResetAt),
+      weeklyReset: formatResetRu(quotaProvider.weeklyResetAt),
     };
   }
 
@@ -118,11 +120,13 @@ function getActiveQuota(summary: OpenCodexSummary): ActiveQuotaInfo | null {
 }
 
 async function fetchOpenCodexData($: any): Promise<OpenCodexSummary> {
+  const ocxHome = (await $.env.get('OPENCODEX_HOME'))?.trim();
   const homeDir =
-    (await $.env.get('HOME')) ||
-    (await $.env.get('USERPROFILE')) ||
+    ocxHome ||
+    (await $.env.get('USERPROFILE'))?.trim() ||
+    (await $.env.get('HOME'))?.trim() ||
     '';
-  const ocxDir = homeDir ? `${homeDir}/.opencodex` : '.opencodex';
+  const ocxDir = ocxHome || (homeDir ? `${homeDir}/.opencodex` : '.opencodex');
 
   let port = 10100;
   try {
@@ -166,7 +170,7 @@ async function fetchOpenCodexData($: any): Promise<OpenCodexSummary> {
     const slice = lines.slice(-50);
     for (let i = slice.length - 1; i >= 0; i--) {
       try {
-        const row = JSON.parse(slice[i]);
+        const row = JSON.parse(slice[i].trim());
         const req: RequestUsageItem = {
           timestamp: row.timestamp || Date.now(),
           model: row.servedModel || row.model || activeModel,
@@ -321,11 +325,6 @@ async function fetchOpenCodexData($: any): Promise<OpenCodexSummary> {
                 ? Math.round(typedQ.weeklyPercent)
                 : undefined,
             weeklyResetAt: typedQ.weeklyResetAt,
-            monthlyPercent:
-              typedQ.monthlyPercent !== undefined
-                ? Math.round(typedQ.monthlyPercent)
-                : undefined,
-            monthlyResetAt: typedQ.monthlyResetAt,
             customWindows: windows,
             updatedAt: typedQ.updatedAt,
           });
@@ -422,11 +421,24 @@ export const register: Register = (on) => {
     const { Box, Text, Button } = $.ui.resolve(e);
     const q = getActiveQuota(summary);
 
-    const colorForRemaining = (rem?: number) => {
-      if (rem === undefined) return undefined;
+    const colorForRemaining = (rem: number) => {
       if (rem <= 15) return 'red';
       if (rem <= 30) return 'yellow';
-      return 'green';
+      return COLOR_PRIMARY;
+    };
+
+    const renderBar = (rem: number, width = 8) => {
+      const clamped = Math.max(0, Math.min(100, Math.round(rem)));
+      const filled = Math.round((clamped / 100) * width);
+      const empty = width - filled;
+      const barColor = colorForRemaining(clamped);
+
+      return (
+        <Text>
+          <Text color={barColor}>{'━'.repeat(filled)}</Text>
+          <Text color={COLOR_BG_LINE}>{'─'.repeat(empty)}</Text>
+        </Text>
+      );
     };
 
     return (
@@ -436,16 +448,18 @@ export const register: Register = (on) => {
             <Text>
               <Text>5ч: </Text>
               <Text color={colorForRemaining(q.fiveHourRemaining)}>
-                {q.fiveHourRemaining}% {renderCleanBar(q.fiveHourRemaining, 8)}
+                {q.fiveHourRemaining}%{' '}
               </Text>
+              {renderBar(q.fiveHourRemaining, 8)}
               {q.fiveHourReset && <Text dimColor> ({q.fiveHourReset})</Text>}
               {q.weeklyRemaining !== undefined && (
                 <Text>
                   <Text dimColor> · </Text>
                   <Text>Неделя: </Text>
                   <Text color={colorForRemaining(q.weeklyRemaining)}>
-                    {q.weeklyRemaining}% {renderCleanBar(q.weeklyRemaining, 8)}
+                    {q.weeklyRemaining}%{' '}
                   </Text>
+                  {renderBar(q.weeklyRemaining, 8)}
                   {q.weeklyReset && <Text dimColor> ({q.weeklyReset})</Text>}
                 </Text>
               )}
@@ -479,6 +493,7 @@ export const register: Register = (on) => {
     }
 
     const primary =
+      summary.quotas.find((q) => q.provider === 'google-antigravity') ||
       summary.quotas.find((q) => q.provider === summary.activeProvider) ||
       summary.quotas[0];
 
@@ -491,6 +506,20 @@ export const register: Register = (on) => {
     const gemWeekRem = gemWeek ? Math.round(100 - gemWeek.percent) : undefined;
     const cla5hRem = cla5h ? Math.round(100 - cla5h.percent) : undefined;
     const claWeekRem = claWeek ? Math.round(100 - claWeek.percent) : undefined;
+
+    const renderPaneBar = (rem: number, width = 8) => {
+      const clamped = Math.max(0, Math.min(100, Math.round(rem)));
+      const filled = Math.round((clamped / 100) * width);
+      const empty = width - filled;
+      const barColor = clamped <= 15 ? 'red' : clamped <= 30 ? 'yellow' : COLOR_PRIMARY;
+
+      return (
+        <Text>
+          <Text color={barColor}>{'━'.repeat(filled)}</Text>
+          <Text color={COLOR_BG_LINE}>{'─'.repeat(empty)}</Text>
+        </Text>
+      );
+    };
 
     return (
       <Box flexDirection="column" padding={1}>
@@ -508,23 +537,25 @@ export const register: Register = (on) => {
             </Text>
             {gem5hRem !== undefined && (
               <Box flexDirection="row">
-                <Text dimColor>Остаток на 5 часов:   </Text>
-                <Text bold color={gem5hRem <= 20 ? 'red' : 'green'}>
-                  {gem5hRem}% {renderCleanBar(gem5hRem, 10)}
+                <Text dimColor>5 часов:  </Text>
+                <Text bold color={gem5hRem <= 20 ? 'red' : COLOR_PRIMARY}>
+                  {gem5hRem}%{' '}
                 </Text>
+                {renderPaneBar(gem5hRem, 8)}
                 {gem5h?.resetAt && (
-                  <Text dimColor> (сброс {formatResetRu(gem5h.resetAt)})</Text>
+                  <Text dimColor> ({formatResetRu(gem5h.resetAt)})</Text>
                 )}
               </Box>
             )}
             {gemWeekRem !== undefined && (
               <Box flexDirection="row">
-                <Text dimColor>Остаток на неделю:    </Text>
-                <Text bold color={gemWeekRem <= 20 ? 'red' : 'green'}>
-                  {gemWeekRem}% {renderCleanBar(gemWeekRem, 10)}
+                <Text dimColor>Неделя:   </Text>
+                <Text bold color={gemWeekRem <= 20 ? 'red' : COLOR_PRIMARY}>
+                  {gemWeekRem}%{' '}
                 </Text>
+                {renderPaneBar(gemWeekRem, 8)}
                 {gemWeek?.resetAt && (
-                  <Text dimColor> (сброс {formatResetRu(gemWeek.resetAt)})</Text>
+                  <Text dimColor> ({formatResetRu(gemWeek.resetAt)})</Text>
                 )}
               </Box>
             )}
@@ -540,23 +571,25 @@ export const register: Register = (on) => {
             </Text>
             {cla5hRem !== undefined && (
               <Box flexDirection="row">
-                <Text dimColor>Остаток на 5 часов:   </Text>
-                <Text bold color={cla5hRem <= 20 ? 'red' : 'green'}>
-                  {cla5hRem}% {renderCleanBar(cla5hRem, 10)}
+                <Text dimColor>5 часов:  </Text>
+                <Text bold color={cla5hRem <= 20 ? 'red' : COLOR_PRIMARY}>
+                  {cla5hRem}%{' '}
                 </Text>
+                {renderPaneBar(cla5hRem, 8)}
                 {cla5h?.resetAt && (
-                  <Text dimColor> (сброс {formatResetRu(cla5h.resetAt)})</Text>
+                  <Text dimColor> ({formatResetRu(cla5h.resetAt)})</Text>
                 )}
               </Box>
             )}
             {claWeekRem !== undefined && (
               <Box flexDirection="row">
-                <Text dimColor>Остаток на неделю:    </Text>
-                <Text bold color={claWeekRem <= 20 ? 'red' : 'green'}>
-                  {claWeekRem}% {renderCleanBar(claWeekRem, 10)}
+                <Text dimColor>Неделя:   </Text>
+                <Text bold color={claWeekRem <= 20 ? 'red' : COLOR_PRIMARY}>
+                  {claWeekRem}%{' '}
                 </Text>
+                {renderPaneBar(claWeekRem, 8)}
                 {claWeek?.resetAt && (
-                  <Text dimColor> (сброс {formatResetRu(claWeek.resetAt)})</Text>
+                  <Text dimColor> ({formatResetRu(claWeek.resetAt)})</Text>
                 )}
               </Box>
             )}
@@ -572,7 +605,10 @@ export const register: Register = (on) => {
             </Text>
             <Box flexDirection="row">
               <Text dimColor>5 часов:  </Text>
-              <Text bold>{Math.round(100 - primary.fiveHourPercent)}%</Text>
+              <Text bold color={COLOR_PRIMARY}>
+                {Math.round(100 - primary.fiveHourPercent)}%{' '}
+              </Text>
+              {renderPaneBar(Math.round(100 - primary.fiveHourPercent), 10)}
               {primary.fiveHourResetAt && (
                 <Text dimColor> ({formatResetRu(primary.fiveHourResetAt)})</Text>
               )}
@@ -580,7 +616,10 @@ export const register: Register = (on) => {
             {primary.weeklyPercent !== undefined && (
               <Box flexDirection="row">
                 <Text dimColor>Неделя:   </Text>
-                <Text bold>{Math.round(100 - primary.weeklyPercent)}%</Text>
+                <Text bold color={COLOR_PRIMARY}>
+                  {Math.round(100 - primary.weeklyPercent)}%{' '}
+                </Text>
+                {renderPaneBar(Math.round(100 - primary.weeklyPercent), 10)}
                 {primary.weeklyResetAt && (
                   <Text dimColor> ({formatResetRu(primary.weeklyResetAt)})</Text>
                 )}
@@ -595,21 +634,19 @@ export const register: Register = (on) => {
           РАСХОД ТОКЕНОВ В СЕССИИ
         </Text>
         <Box flexDirection="row">
-          <Text dimColor>Всего токенов:   </Text>
+          <Text dimColor>Всего:    </Text>
           <Text>{formatNumber(summary.sessionTotalTokens)}</Text>
+          <Text dimColor>
+            {' '}(in: {formatNumber(summary.sessionInputTokens)}, out:{' '}
+            {formatNumber(summary.sessionOutputTokens)})
+          </Text>
         </Box>
         <Box flexDirection="row">
-          <Text dimColor>Входные:         </Text>
-          <Text>{formatNumber(summary.sessionInputTokens)}</Text>
-        </Box>
-        <Box flexDirection="row">
-          <Text dimColor>Кэшировано:      </Text>
-          <Text color="green">{formatNumber(summary.sessionCachedTokens)}</Text>
-          <Text dimColor> ({summary.sessionSavingsPercent}% попадание в кэш)</Text>
-        </Box>
-        <Box flexDirection="row">
-          <Text dimColor>Выходные:        </Text>
-          <Text>{formatNumber(summary.sessionOutputTokens)}</Text>
+          <Text dimColor>Кэш:      </Text>
+          <Text color={COLOR_PRIMARY}>
+            {formatNumber(summary.sessionCachedTokens)}
+          </Text>
+          <Text dimColor> ({summary.sessionSavingsPercent}% попадание)</Text>
         </Box>
         <Text> </Text>
 
