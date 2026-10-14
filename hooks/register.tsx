@@ -365,6 +365,15 @@ export const register: Register = (on) => {
 
       const initial = await fetchOpenCodexData($);
       await update($, summaryAtom, () => initial);
+
+      // Periodic background refresh every 30 seconds
+      $.clock.every(30000, async () => {
+        try {
+          const fresh = await fetchOpenCodexData($);
+          await update($, summaryAtom, () => fresh);
+          $.ui.invalidate('ui.render');
+        } catch {}
+      });
     } catch {}
 
     return next(e);
